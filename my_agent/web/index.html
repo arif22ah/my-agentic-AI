@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
+<title>Self-Healing Codegen</title>
+<style>
+:root{--bg:#fff;--fg:#1c1c1e;--mut:#6b7280;--card:#f4f4f6;--bd:#d9d9de;--ok:#15803d;--bad:#b91c1c;--warn:#b45309;--ac:#4f46e5}
+@media (prefers-color-scheme:dark){:root{--bg:#141416;--fg:#ececf0;--mut:#9ca3af;--card:#1f1f23;--bd:#34343a;--ok:#4ade80;--bad:#f87171;--warn:#fbbf24;--ac:#818cf8}}
+*{box-sizing:border-box}body{margin:0;display:flex;min-height:100vh;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif}
+aside{width:260px;border-right:1px solid var(--bd);padding:16px;overflow:auto}aside h2{font-size:13px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
+aside ul{list-style:none;margin:0;padding:0}aside li{padding:8px;border-radius:8px;cursor:pointer;font-size:13px}aside li:hover{background:var(--card)}
+aside small{display:block;color:var(--mut)}main{flex:1;padding:24px;max-width:960px;min-width:0}
+textarea{width:100%;min-height:90px;padding:10px;border-radius:10px;border:1px solid var(--bd);background:var(--card);color:var(--fg);font:inherit}
+.row{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin:10px 0;color:var(--mut);font-size:13px}
+input[type=number]{width:60px;background:var(--card);color:var(--fg);border:1px solid var(--bd);border-radius:6px;padding:4px}
+button{background:var(--ac);color:#fff;border:0;border-radius:8px;padding:8px 16px;font:inherit;cursor:pointer}button.alt{background:var(--card);color:var(--fg);border:1px solid var(--bd);padding:4px 10px;font-size:13px}
+#timeline{list-style:none;padding:0;margin:16px 0}#timeline li{padding:4px 0 4px 14px;border-left:3px solid var(--bd)}
+#timeline .ok{border-color:var(--ok)}#timeline .bad{border-color:var(--bad)}#timeline .warn{border-color:var(--warn)}
+#hint{background:var(--card);border:1px solid var(--warn);border-radius:10px;padding:12px;margin:12px 0}#hint input{width:100%;padding:8px;margin:8px 0;border-radius:6px;border:1px solid var(--bd);background:var(--bg);color:var(--fg)}
+#bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap}#bar .on{background:var(--ac);color:#fff;border-color:var(--ac)}.sp{flex:1}
+pre{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px;overflow:auto;max-height:60vh;font:13px/1.45 ui-monospace,monospace;white-space:pre-wrap}
+.badge{font-size:12px;padding:3px 9px;border-radius:999px;border:1px solid var(--bd);background:var(--card);color:var(--mut)}
+@media (max-width:760px){body{flex-direction:column}aside{width:auto;border-right:0;border-bottom:1px solid var(--bd)}}
+</style>
+</head>
+<body>
+<aside><div style="display:flex;justify-content:space-between;align-items:center"><h2>History</h2><button class="alt" id="clearhist" type="button" style="padding:2px 8px;font-size:11px">Clear</button></div><ul id="hist"></ul></aside>
+<main>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <h1 style="margin:0">Self-healing code generator</h1>
+    <button id="modebadge" type="button" class="alt" title="Click to toggle Offline Self-Healing Mode vs Live LLM">Checking mode...</button>
+  </div>
+  <form id="f">
+    <textarea id="task" required minlength="5" placeholder="Describe the code you want, e.g. write a function that prints leap year or not a leap year..."></textarea>
+    <div class="row">
+      <label>Max attempts <input id="max" type="number" min="1" max="15" value="5"></label>
+      <label><input id="hitl" type="checkbox"> Ask me for a hint if it gets stuck</label>
+      <span class="sp"></span><button id="go">Generate</button>
+    </div>
+  </form>
+  <div id="hint" hidden><b>The agents are stuck.</b> Give the coder a nudge:
+    <input id="hinttext" placeholder="e.g. use a stable softmax by subtracting the max"><button id="sendhint" type="button">Send hint</button></div>
+  <ol id="timeline"></ol>
+  <div id="bar">
+    <button class="alt" data-t="code">Code</button><button class="alt" data-t="tests">Tests</button>
+    <button class="alt" data-t="plan">Plan</button><button class="alt" data-t="attempts">Attempts</button>
+    <span class="sp"></span><button class="alt" id="copy">Copy</button><button class="alt" id="dl">Download .py</button>
+  </div>
+  <pre id="view"></pre>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+let S = {code: "", tests: "", plan: "", attempts: []}, tab = "code", es = null, runId = null;
+
+function log(text, cls = "") {
+  const li = document.createElement("li"); li.className = cls; li.textContent = text;
+  $("#timeline").append(li); li.scrollIntoView({block: "nearest"});
+}
+function show() {
+  $("#view").textContent = tab === "attempts"
+    ? S.attempts.map(a => `#${a.attempt}  ${a.passed ? "PASS" : "FAIL"}\n${a.output}`).join("\n\n") || "(nothing yet)"
+    : S[tab] || "(nothing yet)";
+  document.querySelectorAll("#bar [data-t]").forEach(b => b.classList.toggle("on", b.dataset.t === tab));
+}
+const H = {
+  plan_task: d => { S.plan = d.plan; log("Planner: interface pinned"); },
+  write_tests: d => { S.tests = d.tests; log("Tester: wrote the test suite"); },
+  generate_code: d => { S.code = d.code; log(`Coder: attempt ${d.attempt} (${d.model_tier} model)`); },
+  run_tests: d => { S.attempts.push(d.record); log(`Tester: attempt ${d.record.attempt} ${d.passed ? "passed" : "failed"}`, d.passed ? "ok" : "bad"); },
+  needs_hint: () => { $("#hint").hidden = false; log("Waiting for your hint…", "warn"); },
+  done: d => { S.code = d.code || S.code; log(`Finished: ${d.status} after ${d.attempt} attempt(s)`, d.status === "passed" ? "ok" : "bad"); es.close(); $("#go").disabled = false; loadHistory(); },
+  error: d => { log("Error: " + (d.message || "connection lost"), "bad"); es && es.close(); $("#go").disabled = false; }
+};
+
+$("#f").onsubmit = async e => {
+  e.preventDefault();
+  S = {code: "", tests: "", plan: "", attempts: []}; $("#timeline").innerHTML = ""; $("#hint").hidden = true; show();
+  $("#go").disabled = true;
+  const r = await fetch("/api/runs", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({task: $("#task").value, max_attempts: +$("#max").value, hitl: $("#hitl").checked})});
+  if (!r.ok) { log("Could not start: " + r.status, "bad"); $("#go").disabled = false; return; }
+  runId = (await r.json()).run_id;
+  es && es.close(); es = new EventSource(`/api/runs/${runId}/events`);
+  for (const k of Object.keys(H)) es.addEventListener(k, ev => { H[k](JSON.parse(ev.data)); show(); });
+};
+$("#sendhint").onclick = async () => {
+  const hint = $("#hinttext").value.trim(); if (!hint) return;
+  await fetch(`/api/runs/${runId}/hint`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({hint})});
+  $("#hint").hidden = true; $("#hinttext").value = ""; log("Hint sent");
+};
+document.querySelectorAll("#bar [data-t]").forEach(b => b.onclick = () => { tab = b.dataset.t; show(); });
+$("#copy").onclick = () => navigator.clipboard.writeText(S.code);
+$("#dl").onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([S.code])); a.download = "solution.py"; a.click(); };
+$("#clearhist").onclick = async () => { await fetch("/api/runs", {method: "DELETE"}); loadHistory(); };
+
+let currentMode = "offline_demo";
+async function loadStatus() {
+  try {
+    const info = await (await fetch("/healthz")).json();
+    currentMode = info.mode;
+    const badge = $("#modebadge");
+    badge.textContent = info.mode === "live_llm" ? `Mode: Live LLM (${info.model}) — Click for Offline` : "Mode: Offline Self-Healing (Ready)";
+  } catch {}
+}
+$("#modebadge").onclick = async () => {
+  const wantOffline = currentMode === "live_llm";
+  const info = await (await fetch("/api/mode", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({offline: wantOffline})})).json();
+  currentMode = info.mode;
+  loadStatus();
+};
+
+async function loadHistory() {
+  try {
+    const rows = await (await fetch("/api/runs")).json();
+    $("#hist").innerHTML = "";
+    for (const r of rows) {
+      const li = document.createElement("li");
+      li.textContent = r.task.slice(0, 60);
+      const s = document.createElement("small"); s.textContent = `${r.status} · ${r.attempts} attempt(s)`; li.append(s);
+      li.onclick = () => loadRun(r.id); $("#hist").append(li);
+    }
+  } catch { /* history needs Postgres */ }
+}
+async function loadRun(id) {
+  const r = await (await fetch("/api/runs/" + id)).json();
+  S = {code: r.final_code || "", tests: r.tests || "", plan: r.plan || "", attempts: r.attempt_log || []};
+  $("#timeline").innerHTML = ""; log(`[Historical Run] ${r.status} after ${r.attempts} attempt(s) — click Generate to run again`, r.status === "passed" ? "ok" : "bad");
+  $("#task").value = r.task; tab = "code"; show();
+}
+loadStatus(); loadHistory(); show();
+</script>
+</body>
+</html>

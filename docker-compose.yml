@@ -1,0 +1,57 @@
+x-app: &app
+  build:
+    context: .
+  image: selfheal-app-v2:latest
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql://selfheal:selfheal@db:5432/selfheal
+    SANDBOX_MODE: docker
+  depends_on:
+    db:
+      condition: service_healthy
+  volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+    - ./my_agent:/app/my_agent
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: selfheal
+      POSTGRES_PASSWORD: selfheal
+      POSTGRES_DB: selfheal
+    ports:
+      - "5435:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U selfheal -d selfheal"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Web UI + REST/SSE API on http://localhost:8000
+  api:
+    <<: *app
+    ports:
+      - "8005:8000"
+    restart: unless-stopped
+
+  # Terminal usage: docker compose run --rm cli selfheal "task" --out out/solution.py
+  cli:
+    <<: *app
+    profiles: ["cli"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./my_agent:/app/my_agent
+      - ./out:/app/out
+
+  # Build-only: `docker compose --profile build build sandbox`
+  sandbox:
+    image: selfheal-sandbox:latest
+    build: ./sandbox
+    profiles: ["build"]
+
+volumes:
+  pgdata:
